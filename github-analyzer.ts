@@ -73,7 +73,7 @@ class GitHubRepoAnalyzer {
     }
   }
 
-  private getAllFiles(dir: string, fileList: string[] = []): string[] {
+  public getAllFiles(dir: string, fileList: string[] = []): string[] {
     const files = fs.readdirSync(dir);
     
     files.forEach(file => {
@@ -112,7 +112,7 @@ class GitHubRepoAnalyzer {
     });
   }
 
-  private analyzeRepository(repoPath: string, repo: RepoInfo, filePatterns: string[]): any {
+  public analyzeRepository(repoPath: string, repo: RepoInfo, filePatterns: string[]): any {
     const analysis: any = {
       totalFiles: 0,
       fileTypes: {},
@@ -315,8 +315,15 @@ Options:
   }
 
   if (args.includes('--help')) {
-    console.log(`\nUsage: node github-analyzer.js <search-query> [file-patterns...] [options]\n\nExamples:\n  node github-analyzer.js "dotfiles" "*.zsh" "*.bash" --limit 15\n  node github-analyzer.js "claude.md" --limit 10\n  node github-analyzer.js "cursor rules" ".cursor/rules" "cursor-rules" --limit 20\n\nOptions:\n  --limit <number>    Number of repositories to analyze (default: 10)\n  --help             Show this help message\n`);
+    console.log(`\nUsage: node github-analyzer.js <search-query> [file-patterns...] [options]\n\nExamples:\n  node github-analyzer.js "dotfiles" "*.zsh" "*.bash" --limit 15\n  node github-analyzer.js "claude.md" --limit 10\n  node github-analyzer.js "cursor rules" ".cursor/rules" "cursor-rules" --limit 20\n  node github-analyzer.js --find-file CLAUDE.md --limit 20\n\nOptions:\n  --limit <number>    Number of repositories to analyze (default: 10)\n  --find-file <file>  Find and analyze all repos containing the given file name\n  --help             Show this help message\n`);
     return;
+  }
+
+  // Check for --find-file
+  const findFileIndex = args.findIndex(arg => arg === '--find-file');
+  let findFile = null;
+  if (findFileIndex !== -1 && args[findFileIndex + 1]) {
+    findFile = args[findFileIndex + 1];
   }
 
   const limitIndex = args.findIndex(arg => arg === '--limit');
@@ -324,10 +331,69 @@ Options:
     ? parseInt(args[limitIndex + 1]) 
     : 10;
 
-  const query = args[0];
-  const filePatterns = args.slice(1).filter(arg => arg !== '--limit' && !arg.match(/^\d+$/));
-
   const analyzer = new GitHubRepoAnalyzer();
+
+  if (findFile) {
+    // Use gh code search to find all repos with the file
+    try {
+      console.log(`🔎 Searching for repositories containing file: ${findFile}`);
+      const codeSearchCmd = `gh search code --filename "${findFile}" --json repository,path -L ${limit}`;
+      const output = execSync(codeSearchCmd, { encoding: 'utf8' });
+      const results = JSON.parse(output);
+      // Extract unique repos
+      const repoMap = new Map();
+      results.forEach((item: any) => {
+        const repo = item.repository;
+        const key = repo.fullName || `${repo.owner.login || repo.owner}/${repo.name}`;
+        if (!repoMap.has(key)) {
+          repoMap.set(key, {
+            name: repo.name,
+            owner: repo.owner.login || repo.owner,
+            url: repo.url,
+            description: repo.description || '',
+            stars: repo.stargazersCount || repo.stargazers_count || 0,
+            language: repo.language || 'Unknown'
+          });
+        }
+      });
+      const repos = Array.from(repoMap.values()).slice(0, limit);
+      console.log(`Found ${repos.length} unique repositories with file: ${findFile}`);
+      for (const repo of repos) {
+        try {
+          const localPath = await analyzer.cloneRepository(repo);
+          const allFiles = analyzer.getAllFiles(localPath);
+          const matchingFiles = allFiles.filter(f => f.endsWith(findFile));
+          const analysis = analyzer.analyzeRepository(localPath, repo, [findFile]);
+          analyzer["results"].push({
+            repo,
+            localPath,
+            files: allFiles.map(f => f.replace(localPath, '').replace(/^\//, '')),
+            matchingFiles: matchingFiles.map(f => f.replace(localPath, '').replace(/^\//, '')),
+            analysis
+          });
+          console.log(`✅ Analyzed ${repo.owner}/${repo.name} (${matchingFiles.length} matching files)`);
+        } catch (error) {
+          console.error(`❌ Failed to analyze ${repo.owner}/${repo.name}:`, error);
+        }
+      }
+      console.log('\n📊 Analysis complete!');
+      console.log('\n' + analyzer.generateReport());
+      // Save report to file
+      const reportPath = `analysis-report-${Date.now()}.md`;
+      fs.writeFileSync(reportPath, analyzer.generateReport());
+      console.log(`📄 Report saved to: ${reportPath}`);
+    } catch (error) {
+      console.error('❌ Analysis failed:', error);
+    } finally {
+      // analyzer.cleanup();
+      console.log(`\n🗂️  Repositories are checked out to: ${analyzer["tempDir"]}`);
+    }
+    return;
+  }
+
+  // Normal mode
+  const query = args[0];
+  const filePatterns = args.slice(1).filter(arg => arg !== '--limit' && !arg.match(/^\d+$/) && arg !== '--find-file' && arg !== findFile);
 
   try {
     console.log(`🚀 Starting analysis...`);
